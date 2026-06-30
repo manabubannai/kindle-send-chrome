@@ -76,6 +76,7 @@ Now **Send to Kindle** delivers in one click.
 - [x] Article extraction (Readability) + clean HTML
 - [x] Lazy-image resolution (`data-src`/`srcset`/`<picture>`) + embedding
 - [x] Transcode WebP/AVIF → JPEG (Kindle's EPUB converter can't render WebP)
+- [x] Resize/recompress images (cap 1600px, JPEG q0.75) to stay under Vercel's 4.5MB relay limit
 - [x] Download HTML with base64-inlined images (zero-setup, self-contained)
 - [x] EPUB output with embedded image files (sent to Kindle)
 - [x] One-click send via Vercel + Gmail SMTP relay (no domain/DNS)

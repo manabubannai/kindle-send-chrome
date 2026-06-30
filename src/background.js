@@ -320,22 +320,36 @@ function extForMime(mime, url) {
   return { mime: "image/jpeg", ext: "jpg" };
 }
 
-// Kindle's EPUB converter renders JPEG/PNG/GIF/BMP but NOT WebP/AVIF (it shows an
-// empty placeholder box). Browsers render WebP fine, which is why the HTML preview
-// looks correct but the Kindle EPUB doesn't. Transcode anything Kindle can't display
-// to JPEG via OffscreenCanvas (both APIs work in an MV3 service worker).
-const KINDLE_SAFE_EXT = /^(jpg|jpeg|png|gif|bmp)$/i;
-async function toKindleSafe(bytes, mime, ext) {
-  if (KINDLE_SAFE_EXT.test(ext)) return { bytes, mime, ext };
+// Two image problems solved here:
+//  1) Kindle's EPUB converter can't render WebP/AVIF (shows an empty placeholder).
+//  2) Vercel caps the relay request body at ~4.5MB, so full-resolution images make
+//     large articles fail to send ("FUNCTION_PAYLOAD_TOO_LARGE" / 413).
+// So normalize every raster image: cap the longest side and re-encode to JPEG. That
+// guarantees a Kindle-renderable format AND keeps the EPUB small enough to send.
+// Uses createImageBitmap + OffscreenCanvas (both available in an MV3 service worker).
+const MAX_IMAGE_SIDE = 1600; // plenty for Kindle screens
+const JPEG_QUALITY = 0.75;
+async function normalizeImage(bytes, mime, ext) {
+  // Leave GIFs alone (may be animated; usually small); other types get re-encoded.
+  if (/^gif$/i.test(ext)) return { bytes, mime, ext };
   try {
     const bmp = await createImageBitmap(new Blob([bytes], { type: mime }));
-    const canvas = new OffscreenCanvas(bmp.width, bmp.height);
+    const maxSide = Math.max(bmp.width, bmp.height);
+    // Skip re-encoding small JPEGs that are already within budget (avoids quality loss).
+    if (/^(jpg|jpeg)$/i.test(ext) && maxSide <= MAX_IMAGE_SIDE && bytes.length < 150 * 1024) {
+      bmp.close();
+      return { bytes, mime, ext };
+    }
+    const scale = Math.min(1, MAX_IMAGE_SIDE / maxSide);
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = new OffscreenCanvas(w, h);
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "#ffffff"; // flatten any transparency onto white for JPEG
-    ctx.fillRect(0, 0, bmp.width, bmp.height);
-    ctx.drawImage(bmp, 0, 0);
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bmp, 0, 0, w, h);
     bmp.close();
-    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: 0.85 });
+    const blob = await canvas.convertToBlob({ type: "image/jpeg", quality: JPEG_QUALITY });
     const out = new Uint8Array(await blob.arrayBuffer());
     if (out.length) return { bytes: out, mime: "image/jpeg", ext: "jpg" };
   } catch (_e) {
@@ -353,7 +367,7 @@ async function fetchImage(url) {
     try {
       const raw = isB64 ? base64ToBytes(m[3]) : enc.encode(decodeURIComponent(m[3]));
       const { ext } = extForMime(mime, url);
-      const safe = await toKindleSafe(raw, mime, ext);
+      const safe = await normalizeImage(raw, mime, ext);
       return { url, ok: true, ...safe };
     } catch (_e) {
       return { url, ok: false };
@@ -368,7 +382,7 @@ async function fetchImage(url) {
     const buf = new Uint8Array(await res.arrayBuffer());
     if (!buf.length || buf.length > 12 * 1024 * 1024) return { url, ok: false };
     const { mime, ext } = extForMime(res.headers.get("content-type"), url);
-    const safe = await toKindleSafe(buf, mime, ext);
+    const safe = await normalizeImage(buf, mime, ext);
     return { url, ok: true, ...safe };
   } catch (_e) {
     return { url, ok: false };
